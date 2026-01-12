@@ -1,0 +1,12 @@
+streamlit
+torch
+torchvision
+transformers
+vaderSentiment
+demoji
+pillow
+numpy
+pandas
+shap
+opencv-python
+matplotlib
