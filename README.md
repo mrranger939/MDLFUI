@@ -13,4 +13,6 @@ my-project/
 └── data/
     └── MultiModalDataset/
 ```
+Sample UI:
+<img width="1358" height="644" alt="image" src="https://github.com/user-attachments/assets/83f14cd2-32bc-49bb-ab32-9882782c1cd6" />
 
