@@ -27,22 +27,22 @@ class RobustTriModalClassifier(nn.Module):
         combined = torch.cat((x_text, x_visual, x_behavior), dim=1)
         return self.network(combined)
 
-def load_all_models(model_path, device):
-    # Get token from streamlit secrets
-    hf_token = st.secrets.get("HF_TOKEN")
-
-    # 1. Main Fusion Model
+def load_models(model_path, device):
+    # Retrieve token from .streamlit/secrets.toml
+    hf_token = st.secrets["HF_TOKEN"]
+    
+    # 1. Load your trained Fusion Model (cell 23)
     model = RobustTriModalClassifier()
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.to(device).eval()
 
-    # 2. MentalBERT (Requires Token)
-    model_name = "AIMH/mental-bert-base-cased"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
-    bert_model = AutoModel.from_pretrained(model_name, token=hf_token).to(device).eval()
+    # 2. Load MentalBERT (cell 12)
+    m_name = "AIMH/mental-bert-base-cased"
+    tokenizer = AutoTokenizer.from_pretrained(m_name, token=hf_token)
+    bert = AutoModel.from_pretrained(m_name, token=hf_token).to(device).eval()
 
-    # 3. Visual Feature Extractor (EfficientNet)
+    # 3. Load EfficientNetV2 for Visual Extraction (cell 19)
     base_vis = models.efficientnet_v2_s(weights='IMAGENET1K_V1')
-    model_visual = nn.Sequential(*list(base_vis.children())[:-1]).to(device).eval()
+    vis_extractor = nn.Sequential(*list(base_vis.children())[:-1]).to(device).eval()
 
-    return model, tokenizer, bert_model, model_visual
+    return model, tokenizer, bert, vis_extractor

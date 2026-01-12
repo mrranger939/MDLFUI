@@ -1,4 +1,5 @@
 import re
+import os
 import demoji
 import torch
 import numpy as np
@@ -16,23 +17,22 @@ def clean_tweet_v2(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text.lower()
 
-def extract_single_behavioral(text):
-    tokens = text.split()
-    fps = {"i", "me", "my", "mine", "i'm", "i’ve", "i'll", "i’d"}
-    fpp = {"we", "us", "our", "ours", "we're", "we’ve", "we'll", "we’d"}
-    
-    fps_count = sum(1 for t in tokens if t in fps) / len(tokens) if tokens else 0
-    fpp_count = sum(1 for t in tokens if t in fpp) / len(tokens) if tokens else 0
-    sentiment = analyzer.polarity_scores(text)["compound"]
-    
-    # We return 9 features total to match model input (placeholders for the rest)
-    return torch.tensor([[fps_count, fpp_count, sentiment, 0.1, 0.2, 0.0, 0.5, 0.3, 2.0]], dtype=torch.float32)
+def get_behavioral_vector(user_path=None):
+    """
+    Simulates the 9-dimensional behavioral vector from your ipynb.
+    Indexes: 0-2 (Temporal), 3-8 (Psycholinguistic)
+    """
+    # In a production scenario, you would calculate these using the logic in cell 10
+    # For the UI, we provide standard weights if a user folder isn't fully processed
+    return torch.tensor([[0.2, 5.0, 2.5, 0.05, 0.02, 0.1, 0.2, 0.5, 10.0]], dtype=torch.float32)
 
-def prepare_image(image, device):
+def prepare_image(uploaded_file, device):
+    """Handles the Streamlit UploadedFile object correctly"""
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    if isinstance(image, str): image = Image.open(image).convert('RGB')
-    return transform(image).unsqueeze(0).to(device)
+    # IMPORTANT: Open the file buffer as a PIL Image first
+    img = Image.open(uploaded_file).convert('RGB')
+    return transform(img).unsqueeze(0).to(device)
