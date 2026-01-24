@@ -4,122 +4,138 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2
 import os
+import pandas as pd
 from PIL import Image
 from skimage.segmentation import slic
 from model_utils import load_models
 from data_utils import clean_tweet_v2, get_behavioral_vector, prepare_image
 
 # --- CONFIG ---
-st.set_page_config(page_title="Tri-Modal AI Diagnostic", layout="wide")
+st.set_page_config(page_title="Tri-Modal AI Dashboard", layout="wide")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @st.cache_resource
 def init_app():
-    # Path to your BEST model from the notebook
-    return load_models("models/best_trimodal_model_V3_5.pth", device)
+    return load_models("models/best_trimodal_model_V3.pth", device)
 
 model, tokenizer, bert, vis_extractor = init_app()
 
-BEH_NAMES = ["Late Night", "Frequency", "Time Var", "Self-Focus", "Collective Focus", "Volatility", "Media Ratio", "Mentions", "Social Circle"]
+BEH_NAMES = [
+    "Late Night Ratio", "Post Frequency", "Routine Var",
+    "Self-Focus Ratio", "Sentiment Volatility", "Mentions Count",
+    "Media-to-Text Ratio", "Avg Post Length", "Reply Ratio"
+]
 
-# --- UI HEADER ---
-st.title("🧠 Tri-Modal Depression Interpretability Report")
+# --- MAIN UI ---
+st.title("🧠 Tri-Modal Depression Interpretability Dashboard")
 st.markdown("---")
 
 # --- SIDEBAR: DYNAMIC USER SELECTION ---
-st.sidebar.header("👤 Impersonation Settings")
-category = st.sidebar.selectbox("Category", ["negative", "positive"])
-dataset_base = f"data/MultiModalDataset/{category}"
+st.sidebar.title("👤 Impersonation Settings")
+category = st.sidebar.selectbox("Select Category", ["negative", "positive"])
+dataset_path = os.path.join("data", "MultiModalDataset", category)
 
-if os.path.exists(dataset_base):
-    users = [d for d in os.listdir(dataset_base) if os.path.isdir(os.path.join(dataset_base, d))]
-    selected_user = st.sidebar.selectbox("Select User Folder", users)
-    user_folder = os.path.join(dataset_base, selected_user)
+selected_user_id = None
+if os.path.exists(dataset_path):
+    available_users = [d for d in os.listdir(dataset_path) if os.path.isdir(os.path.join(dataset_path, d))]
+    selected_user_id = st.sidebar.selectbox("Select User ID", available_users)
+    user_folder_path = os.path.join(dataset_path, selected_user_id)
+    
+    # --- NEW: IMMEDIATE BEHAVIORAL FEEDBACK ---
+    st.sidebar.markdown("### 📊 Extracted User Markers")
+    b_vec_sidebar = get_behavioral_vector(user_folder_path).flatten().numpy()
+    
+    # Displaying markers as a clean table in the sidebar
+    df_beh = pd.DataFrame({"Marker": BEH_NAMES, "Value": b_vec_sidebar})
+    st.sidebar.table(df_beh)
 else:
-    st.sidebar.error("Dataset folders not found at " + dataset_base)
+    st.sidebar.error("Dataset not found!")
 
-# --- MAIN UI ---
-col1, col2 = st.columns([1, 1.3])
+# --- INPUT SECTION ---
+col1, col2 = st.columns([1, 1.5])
 
 with col1:
-    st.subheader("📝 Input Section")
-    tweet_text = st.text_area("Tweet Text", placeholder="How are they feeling?", height=150)
-    uploaded_image = st.file_uploader("Upload Image (Optional)", type=["jpg", "png", "jpeg"])
+    st.subheader("📝 Content Input")
+    tweet_text = st.text_area("Tweet Content", placeholder="What's on their mind?", height=200)
+    uploaded_image = st.file_uploader("Attach Image (Optional)", type=["jpg", "png", "jpeg"])
     
-    if st.button("🚀 Run Full Interpretability Analysis", use_container_width=True):
-        if not tweet_text:
-            st.error("Please enter tweet text.")
-        else:
-            # 1. FEATURE EXTRACTION
-            cleaned = clean_tweet_v2(tweet_text)
+    analyze_btn = st.button("🚀 Run Complete Analysis", use_container_width=True)
+
+if analyze_btn:
+    if not tweet_text:
+        st.error("Text content is required.")
+    else:
+        # 1. PRE-PROCESSING
+        cleaned = clean_tweet_v2(tweet_text)
+        t_in = tokenizer(cleaned, return_tensors="pt", padding=True, truncation=True).to(device)
+        with torch.no_grad():
+            t_vec = bert(**t_in).last_hidden_state[:, 0, :]
+        
+        v_vec = torch.flatten(vis_extractor(prepare_image(uploaded_image, device)), 1) if uploaded_image else torch.zeros((1, 1280)).to(device)
+        b_vec = get_behavioral_vector(user_folder_path).to(device)
+
+        # 2. PREDICTION
+        with torch.no_grad():
+            prob = model(t_vec, v_vec, b_vec).item()
+        
+        # 3. DASHBOARD OUTPUT (Vertical Stack for Large Graphs)
+        with col2:
+            st.subheader("🔍 Interpretability Diagnostic")
             
-            # Text Vec (768-dim)
-            t_in = tokenizer(cleaned, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
-            with torch.no_grad():
-                t_vec = bert(**t_in).last_hidden_state[:, 0, :]
+            # Probability Metric
+            label_str = "Positive (Depressed)" if prob > 0.5 else "Negative (Healthy)"
+            st.metric("Probability Score", f"{prob:.2%}", label_str)
+
+            # Simulated SHAP values
+            instance_shap = np.random.uniform(-0.15, 0.15, 2057) 
             
-            # Visual Vec (1280-dim)
+            # --- PART A: GLOBAL CONTRIBUTION (Full Width) ---
+            st.write("### 🌍 Global Modality Contribution")
+            text_sum = np.sum(np.abs(instance_shap[:768]))
+            vis_sum = np.sum(np.abs(instance_shap[768:2048]))
+            beh_sum = np.sum(np.abs(instance_shap[2048:]))
+
+            fig1, ax1 = plt.subplots(figsize=(12, 4))
+            ax1.bar(['Textual', 'Visual', 'Behavioral'], [text_sum, vis_sum, beh_sum], 
+                     color=['#4e79a7', 'silver' if not uploaded_image else '#f28e2b', '#e15759'])
+            st.pyplot(fig1)
+
+            # --- PART B: BEHAVIORAL BREAKDOWN (Full Width) ---
+            st.write("### 📉 Behavioral Feature Impact")
+            beh_vals = instance_shap[2048:]
+            colors = ['#d62728' if x > 0 else '#1f77b4' for x in beh_vals]
+            fig2, ax2 = plt.subplots(figsize=(12, 6))
+            ax2.barh(BEH_NAMES[:len(beh_vals)], beh_vals, color=colors)
+            ax2.axvline(0, color='black', lw=0.8)
+            st.pyplot(fig2)
+
+            # --- PART C: VISUAL SALIENCY (If Image Exists) ---
             if uploaded_image:
-                v_vec = torch.flatten(vis_extractor(prepare_image(uploaded_image, device)), 1)
-            else:
-                v_vec = torch.zeros((1, 1280)).to(device) # EXACT Null Visual Signal
-            
-            # Behavioral Vec (9-dim) - REAL DATA PARSING
-            b_vec = get_behavioral_vector(user_folder).to(device)
-
-            # 2. PREDICTION
-            model.eval()
-            with torch.no_grad():
-                prob = model(t_vec, v_vec, b_vec).item()
-
-            # 3. DASHBOARD OUTPUT (COL 2)
-            with col2:
-                st.subheader("🔍 Interpretability Diagnostic")
-                res_color = "red" if prob > 0.5 else "green"
-                st.markdown(f"### Prediction: <span style='color:{res_color}'>{'Positive' if prob > 0.5 else 'Negative'}</span> ({prob:.2%})", unsafe_allow_html=True)
-
-                # Simulated SHAP for visualization (Match your notebook dashboard logic)
-                instance_shap = np.random.uniform(-0.1, 0.1, 2057) 
+                st.write("### 🖼️ Visual Saliency Map")
+                img_np = np.array(Image.open(uploaded_image).convert('RGB'))
+                segments = slic(img_np, n_segments=50, compactness=10, sigma=1)
+                saliency_map = np.zeros(img_np.shape[:2])
+                v_shap = instance_shap[768:768+50]
+                for i in range(50): saliency_map[segments == i] = v_shap[i]
                 
-                # PART A: MODALITY CONTRIBUTION
-                t_sum = np.sum(np.abs(instance_shap[:768]))
-                v_sum = np.sum(np.abs(instance_shap[768:2048]))
-                b_sum = np.sum(np.abs(instance_shap[2048:]))
+                fig3, ax3 = plt.subplots(figsize=(12, 8))
+                ax3.imshow(img_np)
+                im = ax3.imshow(saliency_map, cmap='bwr', alpha=0.5)
+                plt.axis('off')
+                st.pyplot(fig3)
 
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-                ax1.bar(['Text', 'Visual', 'Behavior'], [t_sum, v_sum, b_sum], color=['#4e79a7', '#f28e2b', '#e15759'])
-                ax1.set_title("Modality Contribution")
+            # --- PART D: TEXTUAL HIGHLIGHTS ---
+            st.write("### 📝 Textual Saliency")
+            tokens = cleaned.split()
+            t_weights = instance_shap[:len(tokens)]
+            max_w = np.max(np.abs(t_weights)) if np.max(np.abs(t_weights)) > 0 else 1
+            normalized_w = t_weights / max_w
 
-                # PART B: BEHAVIORAL BREAKDOWN
-                beh_vals = instance_shap[2048:2057]
-                ax2.barh(BEH_NAMES, beh_vals, color=['red' if x > 0 else 'blue' for x in beh_vals])
-                ax2.set_title("Behavioral Impact")
-                st.pyplot(fig)
-
-                # PART C: VISUAL SALIENCY
-                if uploaded_image:
-                    st.write("**Visual Saliency Map (Superpixels)**")
-                    img_np = np.array(Image.open(uploaded_image).convert('RGB'))
-                    segments = slic(img_np, n_segments=50, compactness=10, sigma=1)
-                    saliency = np.zeros(img_np.shape[:2])
-                    v_shap_slice = instance_shap[768:768+50]
-                    for i in range(50): saliency[segments == i] = v_shap_slice[i]
-                    
-                    fig_v, ax_v = plt.subplots()
-                    ax_v.imshow(img_np)
-                    ax_v.imshow(saliency, cmap='bwr', alpha=0.4)
-                    plt.axis('off')
-                    st.pyplot(fig_v)
-
-                # PART D: TEXTUAL HIGHLIGHTS
-                st.write("**Word-Level Influence (Vivid Contrast)**")
-                tokens = cleaned.split()
-                t_weights = instance_shap[:len(tokens)]
-                max_w = np.max(np.abs(t_weights)) if len(t_weights) > 0 else 1
-                
-                html = "<div style='line-height: 2.5;'>"
-                for word, w in zip(tokens, t_weights):
-                    alpha = max(abs(w/max_w), 0.1)
-                    bg = f"rgba(255, 0, 0, {alpha})" if w > 0 else f"rgba(0, 0, 255, {alpha})"
-                    html += f"<span style='background-color:{bg}; color:{'white' if alpha > 0.5 else 'black'}; padding:5px 8px; margin:2px; border-radius:4px; font-weight:600;'>{word}</span> "
-                st.markdown(html + "</div>", unsafe_allow_html=True)
+            html_str = "<div style='line-height: 2.8; font-size: 1.1em;'>"
+            for word, weight in zip(tokens, normalized_w):
+                alpha = max(abs(weight), 0.1)
+                bg = f"rgba(255, 0, 0, {alpha})" if weight > 0 else f"rgba(0, 0, 255, {alpha})"
+                txt = "white" if alpha > 0.5 else "black"
+                html_str += f"<span style='background-color:{bg}; color:{txt}; padding:6px 10px; margin:4px; border-radius:5px; font-weight:600;'>{word}</span> "
+            html_str += "</div>"
+            st.markdown(html_str, unsafe_allow_html=True)

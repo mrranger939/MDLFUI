@@ -40,7 +40,7 @@ def load_models(model_path, device):
     tokenizer = AutoTokenizer.from_pretrained(m_name, token=hf_token)
     bert = AutoModel.from_pretrained(m_name, token=hf_token).to(device).eval()
 
-    # 3. EfficientNetV2 (Visual Extractor)
+    # 3. EfficientNetV2
     base_vis = models.efficientnet_v2_s(weights='IMAGENET1K_V1')
     vis_extractor = nn.Sequential(*list(base_vis.children())[:-1]).to(device).eval()
 
