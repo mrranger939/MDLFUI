@@ -28,20 +28,19 @@ class RobustTriModalClassifier(nn.Module):
         return self.network(combined)
 
 def load_models(model_path, device):
-    # Retrieve token from .streamlit/secrets.toml
     hf_token = st.secrets["HF_TOKEN"]
     
-    # 1. Load your trained Fusion Model (cell 23)
+    # 1. Fusion Model
     model = RobustTriModalClassifier()
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.to(device).eval()
 
-    # 2. Load MentalBERT (cell 12)
+    # 2. MentalBERT
     m_name = "AIMH/mental-bert-base-cased"
     tokenizer = AutoTokenizer.from_pretrained(m_name, token=hf_token)
     bert = AutoModel.from_pretrained(m_name, token=hf_token).to(device).eval()
 
-    # 3. Load EfficientNetV2 for Visual Extraction (cell 19)
+    # 3. EfficientNetV2 (Visual Extractor)
     base_vis = models.efficientnet_v2_s(weights='IMAGENET1K_V1')
     vis_extractor = nn.Sequential(*list(base_vis.children())[:-1]).to(device).eval()
 
