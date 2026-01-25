@@ -27,10 +27,26 @@ class RobustTriModalClassifier(nn.Module):
         combined = torch.cat((x_text, x_visual, x_behavior), dim=1)
         return self.network(combined)
 
+class SHAPWrapper(nn.Module):
+    """
+    Wraps the fusion model so SHAP sees it as taking one single 2057-dim vector.
+    This mimics the logic in your notebook's 'explain_v3_complete_dashboard'.
+    """
+    def __init__(self, model):
+        super(SHAPWrapper, self).__init__()
+        self.model = model
+    
+    def forward(self, x):
+        # Split the giant 2057-dim vector back into 3 parts
+        t = x[:, :768]
+        v = x[:, 768:2048]
+        b = x[:, 2048:]
+        return self.model(t, v, b)
+
 def load_models(model_path, device):
     hf_token = st.secrets["HF_TOKEN"]
     
-    # 1. Fusion Model
+    # 1. Load Fusion Model
     model = RobustTriModalClassifier()
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.to(device).eval()
