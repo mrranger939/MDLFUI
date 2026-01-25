@@ -33,6 +33,7 @@ def get_behavioral_vector(user_folder_path):
     except:
         image_ids = set()
 
+    # 1. READ ALL DATA
     with open(timeline_path, "r", encoding='utf-8') as f:
         for line in f:
             try:
@@ -40,9 +41,14 @@ def get_behavioral_vector(user_folder_path):
                 text = tweet.get("text", "")
                 tweet_id = str(tweet.get("id_str", tweet.get("id")))
                 created_at = tweet.get("created_at")
+                
                 if not text: continue
                 
-                tweet_data = {"text": text, "id": tweet_id, "clean": clean_tweet_v2(text)}
+                tweet_data = {
+                    "text": text,
+                    "id": tweet_id,
+                    "clean": clean_tweet_v2(text)
+                }
                 all_valid_tweets.append(tweet_data)
                 
                 if created_at:
@@ -51,7 +57,8 @@ def get_behavioral_vector(user_folder_path):
 
     if not all_valid_tweets: return torch.zeros((1, 9))
 
-    # --- PART A: TEMPORAL (All History) ---
+    # --- PART A: TEMPORAL FEATURES (Uses ENTIRE History) ---
+    # Matches Cell 10 of notebook
     hours = [d.hour for d in all_timestamps]
     unique_days = len(set(d.date() for d in all_timestamps))
     
@@ -59,7 +66,8 @@ def get_behavioral_vector(user_folder_path):
     freq = len(all_valid_tweets) / unique_days if unique_days > 0 else 1.0
     time_var = np.std(hours) if hours else 5.0
 
-    # --- PART B: PSYCHO (Last 50 Only) ---
+    # --- PART B: PSYCHOLINGUISTIC FEATURES (Uses LAST 50 Only) ---
+    # Matches Cell 7 of notebook "lines = f.readlines()[-max_tweets:]"
     recent_tweets = all_valid_tweets[-50:] 
     
     sentiments, total_words, fps_count, fpp_count = [], 0, 0, 0
@@ -68,29 +76,40 @@ def get_behavioral_vector(user_folder_path):
     for t in recent_tweets:
         tokens = t["clean"].split()
         total_words += len(tokens)
+        
+        # Pronouns
         fps_count += sum(1 for tok in tokens if tok in FPS_SINGULAR)
         fpp_count += sum(1 for tok in tokens if tok in FPS_PLURAL)
+        
+        # Sentiment
         sentiments.append(analyzer.polarity_scores(t["clean"])["compound"])
         
+        # Mentions
         mentions = re.findall(r'@\w+', t["text"])
         mention_count += len(mentions)
         unique_mentions.update(mentions)
         
-        if t["id"] in image_ids: media_count += 1
+        # Media Count (Checks valid image IDs)
+        if t["id"] in image_ids:
+            media_count += 1
 
+    # Safety checks
     tweet_count_50 = len(recent_tweets) if len(recent_tweets) > 0 else 1
     if total_words == 0: total_words = 1
 
-    # --- ASSEMBLE VECTOR ---
-    # NEW: We apply np.log1p to "unique_mentions" (Index 8) to normalize the scale
+    # --- ASSEMBLE VECTOR (Raw Values, No Scaler) ---
     vector = [
-        late_night, freq, time_var,
-        fps_count / total_words, fpp_count / total_words,
-        np.std(sentiments) if len(sentiments) > 1 else 0.0,
-        media_count / tweet_count_50,
-        mention_count / tweet_count_50,
-        np.log1p(len(unique_mentions)) # <--- FIXED: Log Transform helps scaling!
+        late_night,                     # 0: Temporal
+        freq,                           # 1: Temporal
+        time_var,                       # 2: Temporal
+        fps_count / total_words,        # 3: Psycho
+        fpp_count / total_words,        # 4: Psycho
+        np.std(sentiments) if len(sentiments) > 1 else 0.0, # 5: Psycho
+        media_count / tweet_count_50,   # 6: Psycho (Ratio over last 50)
+        mention_count / tweet_count_50, # 7: Psycho (Ratio over last 50)
+        len(unique_mentions)            # 8: Psycho (Count over last 50)
     ]
+    
     return torch.tensor([vector], dtype=torch.float32)
 
 def prepare_image(image_input, device):
