@@ -4,7 +4,7 @@ import json
 import demoji
 import torch
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from torchvision import transforms
 from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -25,12 +25,17 @@ def get_behavioral_vector(user_folder_path):
     timeline_path = os.path.join(user_folder_path, "timeline.txt")
     if not os.path.exists(timeline_path): return torch.zeros((1, 9))
 
-    sentiments, total_words, fps_count, fpp_count = [], 0, 0, 0
-    mention_count, unique_mentions, tweet_count, media_count = 0, set(), 0, 0
-    timestamps = []
+    # --- LISTS TO STORE DATA ---
+    all_valid_tweets = [] # For Psycholinguistic (Last 50)
+    all_timestamps = []   # For Temporal (All History)
     
-    image_ids = {os.path.splitext(f)[0] for f in os.listdir(user_folder_path) if f.lower().endswith(('.jpg', '.png', '.jpeg'))}
+    # Robust image check
+    try:
+        image_ids = {os.path.splitext(f)[0] for f in os.listdir(user_folder_path) if f.lower().endswith(('.jpg', '.png', '.jpeg'))}
+    except:
+        image_ids = set()
 
+    # --- PASS 1: PARSE ALL LINES ---
     with open(timeline_path, "r", encoding='utf-8') as f:
         for line in f:
             try:
@@ -38,49 +43,98 @@ def get_behavioral_vector(user_folder_path):
                 text = tweet.get("text", "")
                 tweet_id = str(tweet.get("id_str", tweet.get("id")))
                 created_at = tweet.get("created_at")
+                
                 if not text: continue
                 
-                cleaned = clean_tweet_v2(text)
-                tokens = cleaned.split()
-                total_words += len(tokens)
-                fps_count += sum(1 for t in tokens if t in FPS_SINGULAR)
-                fpp_count += sum(1 for t in tokens if t in FPS_PLURAL)
-                sentiments.append(analyzer.polarity_scores(cleaned)["compound"])
+                # Store data needed for processing
+                tweet_data = {
+                    "text": text,
+                    "id": tweet_id,
+                    "clean": clean_tweet_v2(text)
+                }
+                all_valid_tweets.append(tweet_data)
                 
-                mentions = re.findall(r'@\w+', text)
-                mention_count += len(mentions)
-                unique_mentions.update(mentions)
-                if tweet_id in image_ids: media_count += 1
-                
+                # Store timestamp for Temporal features (Cell 10 uses ALL history)
                 if created_at:
-                    timestamps.append(datetime.strptime(created_at, '%a %b %d %H:%M:%S +0000 %Y'))
-                tweet_count += 1
-            except: continue
+                    dt = datetime.strptime(created_at, '%a %b %d %H:%M:%S +0000 %Y')
+                    all_timestamps.append(dt)
+            except: 
+                continue
 
-    if tweet_count == 0: return torch.zeros((1, 9))
+    if not all_valid_tweets: return torch.zeros((1, 9))
 
-    hours = [d.hour for d in timestamps]
-    unique_days = len(set(d.date() for d in timestamps))
+    # --- PART A: TEMPORAL FEATURES (Uses ALL History) ---
+    hours = [d.hour for d in all_timestamps]
+    unique_days = len(set(d.date() for d in all_timestamps))
     
-    # The Exact 9 Features from Notebook Cell 10
+    # 1. Late Night
+    late_night = sum(1 for h in hours if 0 <= h <= 5) / len(hours) if hours else 0.0
+    # 2. Frequency (Posts/Day)
+    freq = len(all_valid_tweets) / unique_days if unique_days > 0 else 1.0
+    # 3. Variance
+    time_var = np.std(hours) if hours else 5.0
+
+    # --- PART B: PSYCHOLINGUISTIC FEATURES (Uses LAST 50 Only) ---
+    #"]
+    recent_tweets = all_valid_tweets[-50:] 
+    
+    sentiments, total_words, fps_count, fpp_count = [], 0, 0, 0
+    mention_count, unique_mentions, media_count = 0, set(), 0
+    
+    for t in recent_tweets:
+        tokens = t["clean"].split()
+        total_words += len(tokens)
+        
+        # Pronouns
+        fps_count += sum(1 for tok in tokens if tok in FPS_SINGULAR)
+        fpp_count += sum(1 for tok in tokens if tok in FPS_PLURAL)
+        
+        # Sentiment
+        sentiments.append(analyzer.polarity_scores(t["clean"])["compound"])
+        
+        # Mentions
+        mentions = re.findall(r'@\w+', t["text"])
+        mention_count += len(mentions)
+        unique_mentions.update(mentions)
+        
+        # Media
+        if t["id"] in image_ids:
+            media_count += 1
+
+    tweet_count_50 = len(recent_tweets)
+    if tweet_count_50 == 0: tweet_count_50 = 1 # Avoid div/0
+    if total_words == 0: total_words = 1
+
+    # --- ASSEMBLE VECTOR ---
     vector = [
-        sum(1 for h in hours if 0 <= h <= 5) / len(hours) if hours else 0, # LateNight
-        tweet_count / unique_days if unique_days > 0 else 1.0,           # Freq
-        np.std(hours) if hours else 5.0,                                # Var
-        fps_count / total_words if total_words > 0 else 0,              # SelfFocus
-        fpp_count / total_words if total_words > 0 else 0,              # Collective
-        np.std(sentiments) if len(sentiments) > 1 else 0.0,             # Volatility
-        media_count / tweet_count,                                      # MediaRatio
-        mention_count / tweet_count,                                    # Mentions
-        len(unique_mentions)                                            # Circle
+        late_night,     # Temporal (All)
+        freq,           # Temporal (All)
+        time_var,       # Temporal (All)
+        fps_count / total_words,    # Psycho (Last 50)
+        fpp_count / total_words,    # Psycho (Last 50)
+        np.std(sentiments) if len(sentiments) > 1 else 0.0, # Psycho (Last 50)
+        media_count / tweet_count_50,   # Psycho (Last 50)
+        mention_count / tweet_count_50, # Psycho (Last 50)
+        len(unique_mentions)            # Psycho (Last 50) - CRITICAL FIX
     ]
+    
     return torch.tensor([vector], dtype=torch.float32)
 
 def prepare_image(image_input, device):
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    img = Image.open(image_input).convert('RGB')
-    return transform(img).unsqueeze(0).to(device)
+    """Robust image loader. Returns None if corrupt."""
+    try:
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        
+        if isinstance(image_input, str):
+            if not os.path.exists(image_input): return None
+            img = Image.open(image_input).convert('RGB')
+        else:
+            img = Image.open(image_input).convert('RGB')
+            
+        return transform(img).unsqueeze(0).to(device)
+    except (UnidentifiedImageError, OSError, Exception):
+        return None
