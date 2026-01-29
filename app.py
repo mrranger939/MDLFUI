@@ -28,9 +28,8 @@ model, shap_model, tokenizer, bert, vis_extractor = init()
 BEH_NAMES = [
     "Late Night Ratio", "Post Frequency", "Routine Var",
     "Self-Focus Ratio", "Collective Focus", "Sentiment Volatility",
-    "Media-to-Text Ratio", "Avg Post Length", "Reply Ratio"
+    "Media-to-Text Ratio", "Mention Frequency", "Social Circle Size"
 ]
-
 # --- UI HEADER ---
 st.title("🧠 Tri-Modal Depression Interpretability Dashboard")
 st.markdown("---")

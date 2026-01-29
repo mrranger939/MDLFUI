@@ -10,8 +10,8 @@ from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 analyzer = SentimentIntensityAnalyzer()
-FPS_SINGULAR = {"i", "me", "my", "mine", "i'm", "i’ve", "i'll", "i’d"}
-FPS_PLURAL = {"we", "us", "our", "ours", "we're", "we’ve", "we'll", "we’d"}
+FPS_SINGULAR = {"i", "me", "my", "mine", "i'm", "i've", "i'll", "i'd"}
+FPS_PLURAL = {"we", "us", "our", "ours", "we're", "we've", "we'll", "we'd"}
 
 def clean_tweet_v2(text):
     if not text: return ""
@@ -58,7 +58,6 @@ def get_behavioral_vector(user_folder_path):
     if not all_valid_tweets: return torch.zeros((1, 9))
 
     # --- PART A: TEMPORAL FEATURES (Uses ENTIRE History) ---
-    # Matches Cell 10 of notebook
     hours = [d.hour for d in all_timestamps]
     unique_days = len(set(d.date() for d in all_timestamps))
     
@@ -67,7 +66,7 @@ def get_behavioral_vector(user_folder_path):
     time_var = np.std(hours) if hours else 5.0
 
     # --- PART B: PSYCHOLINGUISTIC FEATURES (Uses LAST 50 Only) ---
-    # Matches Cell 7 of notebook "lines = f.readlines()[-max_tweets:]"
+    # ⚠️ CRITICAL: Extract from LAST 50 tweets ONLY (notebook line 242)
     recent_tweets = all_valid_tweets[-50:] 
     
     sentiments, total_words, fps_count, fpp_count = [], 0, 0, 0
@@ -89,25 +88,27 @@ def get_behavioral_vector(user_folder_path):
         mention_count += len(mentions)
         unique_mentions.update(mentions)
         
-        # Media Count (Checks valid image IDs)
+        # Media Count
         if t["id"] in image_ids:
             media_count += 1
 
     # Safety checks
-    tweet_count_50 = len(recent_tweets) if len(recent_tweets) > 0 else 1
+    tweet_count = len(recent_tweets) if len(recent_tweets) > 0 else 1
     if total_words == 0: total_words = 1
 
-    # --- ASSEMBLE VECTOR (Raw Values, No Scaler) ---
+    # --- ASSEMBLE VECTOR (MATCHING NOTEBOOK EXACTLY) ---
+    # ⚠️⚠️⚠️ CRITICAL: This is the EXACT order from notebook Cell 10 ⚠️⚠️⚠️
+    # Lines 470-474 (temporal) + Lines 278-285 (psycho)
     vector = [
-        late_night,                     # 0: Temporal
-        freq,                           # 1: Temporal
-        time_var,                       # 2: Temporal
-        fps_count / total_words,        # 3: Psycho
-        fpp_count / total_words,        # 4: Psycho
-        np.std(sentiments) if len(sentiments) > 1 else 0.0, # 5: Psycho
-        media_count / tweet_count_50,   # 6: Psycho (Ratio over last 50)
-        mention_count / tweet_count_50, # 7: Psycho (Ratio over last 50)
-        len(unique_mentions)            # 8: Psycho (Count over last 50)
+        late_night,                                              # 0: Late Night Ratio
+        freq,                                                    # 1: Post Frequency
+        time_var,                                                # 2: Routine Variability
+        fps_count / total_words,                                 # 3: Self-focus ratio
+        fpp_count / total_words,                                 # 4: Collective focus
+        np.std(sentiments) if len(sentiments) > 1 else 0.0,      # 5: Sentiment volatility
+        media_count / tweet_count,                               # 6: Media-to-text ratio
+        mention_count / tweet_count,                             # 7: Mention frequency ✅ FIXED
+        len(unique_mentions)                                     # 8: Social circle size ✅ FIXED
     ]
     
     return torch.tensor([vector], dtype=torch.float32)
