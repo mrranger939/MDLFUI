@@ -13,16 +13,22 @@ from eval_utils import evaluate_whole_dataset
 
 # --- DASHBOARD CONFIG ---
 st.set_page_config(page_title="Tri-Modal Depression Diagnostic", layout="wide")
-device = torch.device("cpu") # SHAP often runs more reliably on CPU for small batches
+device = torch.device("cpu") # SHAP runs more reliably on CPU for small batches
 
 @st.cache_resource
 def init():
-    model, tokenizer, bert, vis_extractor = load_models("models/best_trimodal_model_V3_5.pth", device)
-    # Wrap model for SHAP
-    shap_model = SHAPWrapper(model)
+    # UPDATED: Point to the folder containing 'ensemble_model_0.pth', etc.
+    # Ensure your models are in 'models/' directory
+    ensemble_model, tokenizer, bert, vis_extractor = load_models("models/ensemble", device)
+    
+    # Wrap the ENTIRE ensemble for SHAP
+    # This wrapper logic is now inside model_utils.py
+    shap_model = SHAPWrapper(ensemble_model)
     shap_model.eval()
-    return model, shap_model, tokenizer, bert, vis_extractor
+    
+    return ensemble_model, shap_model, tokenizer, bert, vis_extractor
 
+# Load resources
 model, shap_model, tokenizer, bert, vis_extractor = init()
 
 BEH_NAMES = [
@@ -32,7 +38,7 @@ BEH_NAMES = [
 ]
 
 # --- UI HEADER ---
-st.title("🧠 Tri-Modal Depression Interpretability Dashboard")
+st.title("🧠 Tri-Modal Ensemble Diagnostic Dashboard")
 st.markdown("---")
 
 # --- SIDEBAR ---
@@ -67,7 +73,7 @@ if analyze_btn:
     if not tweet_text:
         st.error("Please enter text content.")
     else:
-        # 1. Processing
+        # 1. Processing Inputs
         cleaned = clean_tweet_v2(tweet_text)
         t_in = tokenizer(cleaned, return_tensors="pt", padding=True, truncation=True).to(device)
         with torch.no_grad():
@@ -76,18 +82,22 @@ if analyze_btn:
         v_vec = torch.flatten(vis_extractor(prepare_image(uploaded_image, device)), 1) if uploaded_image else torch.zeros((1, 1280)).to(device)
         b_vec = get_behavioral_vector(user_folder).to(device)
 
-        # 2. Predict
+        # 2. Ensemble Prediction
+        # The 'model' here is the EnsembleModel class from model_utils
+        # It handles averaging internally.
         with torch.no_grad():
             prob = model(t_vec, v_vec, b_vec).item()
         
-        # 3. REAL SHAP CALCULATION
-        with st.spinner("Calculating Real-Time SHAP Values (this uses the actual model weights)..."):
+        # 3. REAL SHAP CALCULATION (Ensemble Aware)
+        with st.spinner("Calculating SHAP Values for Ensemble..."):
             # Combine inputs exactly like the notebook
             combined_input = torch.cat((t_vec, v_vec, b_vec), dim=1).requires_grad_(True)
             
-            # Create a "dummy" background (zeros) if real training data isn't loaded
-            # This is standard for GradientExplainer when full dataset is missing
+            # Create a "dummy" background (zeros)
+            # For ensembles, GradientExplainer is robust enough with zero background
             background = torch.zeros((1, 2057)).to(device) 
+            
+            # Using GradientExplainer on the SHAPWrapper (which wraps the Ensemble)
             explainer = shap.GradientExplainer(shap_model, background)
             
             # Calculate SHAP
@@ -102,12 +112,12 @@ if analyze_btn:
         # 4. DASHBOARD
         with col2:
             st.subheader("🔍 Interpretability Diagnostic Report")
-            label = "Positive (Depressed)" if prob > 0.5 else "Negative (Healthy)"
-            st.metric("Depression Confidence", f"{prob:.2%}", label)
+            # Using 0.52 threshold from notebook optimization
+            label = "Positive (Depressed)" if prob > 0.52 else "Negative (Healthy)"
+            st.metric("Ensemble Confidence", f"{prob:.2%}", label)
 
-            # --- PLOT 1: Modality Contribution (REAL VALUES) ---
+            # --- PLOT 1: Global Modality Contribution ---
             st.write("### 🌍 Global Modality Contribution")
-            # Using exact indices from notebook
             t_sum = np.sum(np.abs(instance_shap[:768]))
             v_sum = np.sum(np.abs(instance_shap[768:2048]))
             b_sum = np.sum(np.abs(instance_shap[2048:]))
@@ -128,23 +138,33 @@ if analyze_btn:
             # --- PLOT 3: Visual Saliency ---
             if uploaded_image:
                 st.write("### 🖼️ Visual Saliency Map")
-                img_np = np.array(Image.open(uploaded_image).convert('RGB'))
-                segments = slic(img_np, n_segments=50, compactness=10)
-                saliency = np.zeros(img_np.shape[:2])
-                v_weights = instance_shap[768:768+50] # Map first 50 superpixels
-                for i in range(50): 
-                    if i < len(v_weights): saliency[segments == i] = v_weights[i]
-                
-                fig3, ax3 = plt.subplots(figsize=(12, 8))
-                ax3.imshow(img_np)
-                ax3.imshow(saliency, cmap='bwr', alpha=0.5)
-                plt.axis('off')
-                st.pyplot(fig3)
+                try:
+                    img_np = np.array(Image.open(uploaded_image).convert('RGB'))
+                    # Ensure image is large enough for slic
+                    if img_np.shape[0] > 50 and img_np.shape[1] > 50:
+                         segments = slic(img_np, n_segments=50, compactness=10, sigma=1)
+                         saliency = np.zeros(img_np.shape[:2])
+                         v_weights = instance_shap[768:2048]
+                         
+                         # Map SHAP weights to segments (Approximation)
+                         # We map the first 50 visual features to the 50 segments
+                         for i in range(50): 
+                             if i < len(v_weights): 
+                                 saliency[segments == i] = v_weights[i]
+                             
+                         fig3, ax3 = plt.subplots(figsize=(12, 8))
+                         ax3.imshow(img_np)
+                         ax3.imshow(saliency, cmap='bwr', alpha=0.5)
+                         plt.axis('off')
+                         st.pyplot(fig3)
+                    else:
+                        st.warning("Image too small for Saliency Map generation.")
+                except Exception as e:
+                    st.error(f"Could not generate saliency map: {e}")
 
             # --- PLOT 4: Textual Saliency ---
             st.write("### 📝 Textual Saliency")
             tokens = cleaned.split()
-            # Map first N SHAP values to N tokens
             t_weights = instance_shap[:len(tokens)]
             max_w = np.max(np.abs(t_weights)) if len(t_weights) > 0 else 1
             
@@ -163,13 +183,12 @@ st.subheader("📊 Dataset Evaluation")
 col_eval_btn, col_eval_res = st.columns([1, 2])
 
 with col_eval_btn:
-    st.write("Run evaluation on the entire local dataset to verify model performance.")
-    if st.button("🏁 Calculate Model Accuracy"):
-        with st.spinner("Running evaluation on all users in 'data/MultiModalDataset'... This may take a moment."):
-            # Call the new function
+    st.write("Run evaluation on the entire local dataset to verify Ensemble performance.")
+    if st.button("🏁 Calculate Ensemble Accuracy"):
+        with st.spinner("Running voting evaluation on all users... This may take a moment."):
+            # Call the updated function from eval_utils
             metrics = evaluate_whole_dataset(model, tokenizer, bert, vis_extractor, device)
             
-            # Display Metrics nicely
             st.success("Evaluation Complete!")
             
             # Metric Cards
@@ -183,7 +202,6 @@ with col_eval_btn:
             st.write("**Confusion Matrix:**")
             cm = metrics['Confusion Matrix']
             
-            # Custom HTML Table for Confusion Matrix
             st.markdown(f"""
             <table style="width:50%; text-align:center; border:1px solid #ddd;">
               <tr>
