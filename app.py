@@ -10,6 +10,7 @@ from skimage.segmentation import slic
 from model_utils import load_models, SHAPWrapper
 from data_utils import clean_tweet_v2, get_behavioral_vector, prepare_image
 from eval_utils import evaluate_whole_dataset
+from transformers import pipeline
 
 # --- DASHBOARD CONFIG ---
 st.set_page_config(page_title="Tri-Modal Depression Diagnostic", layout="wide")
@@ -17,25 +18,83 @@ device = torch.device("cpu") # SHAP runs more reliably on CPU for small batches
 
 @st.cache_resource
 def init():
-    # UPDATED: Point to the folder containing 'ensemble_model_0.pth', etc.
-    # Ensure your models are in 'models/' directory
-    ensemble_model, tokenizer, bert, vis_extractor = load_models("models/ensemble", device)
-    
-    # Wrap the ENTIRE ensemble for SHAP
-    # This wrapper logic is now inside model_utils.py
+    ensemble_model, tokenizer, bert, vis_extractor = load_models("models/ensemble/", device)
     shap_model = SHAPWrapper(ensemble_model)
     shap_model.eval()
     
-    return ensemble_model, shap_model, tokenizer, bert, vis_extractor
+    # --- LOAD LOCAL LLM FOR REPORTS ---
+    # Qwen 1.5B is highly capable but small enough to run locally.
+    # If it's too slow on your CPU, change it to "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    st.sidebar.text("Loading local LLM...")
+    local_llm = pipeline(
+        "text-generation", 
+        model="Qwen/Qwen2.5-1.5B-Instruct", 
+        device=-1 if device.type == "cpu" else 0 # -1 forces CPU, 0 uses GPU
+    )
+    
+    return ensemble_model, shap_model, tokenizer, bert, vis_extractor, local_llm
 
-# Load resources
-model, shap_model, tokenizer, bert, vis_extractor = init()
+# Unpack the new local_llm
+model, shap_model, tokenizer, bert, vis_extractor, local_llm = init()
 
 BEH_NAMES = [
     "Late Night Ratio", "Post Frequency", "Routine Var",
     "Self-Focus Ratio", "Collective Focus", "Sentiment Volatility",
     "Media-to-Text Ratio", "Avg Post Length", "Reply Ratio"
 ]
+
+def extract_top_shap_features(instance_shap, tokens, beh_names):
+    # Calculate Modality Percentages
+    t_sum = np.sum(np.abs(instance_shap[:768]))
+    v_sum = np.sum(np.abs(instance_shap[768:2048]))
+    b_sum = np.sum(np.abs(instance_shap[2048:]))
+    total = t_sum + v_sum + b_sum if (t_sum + v_sum + b_sum) > 0 else 1
+    
+    modality_pct = {
+        "Text": f"{(t_sum/total):.1%}",
+        "Visual": f"{(v_sum/total):.1%}",
+        "Behavioral": f"{(b_sum/total):.1%}"
+    }
+
+    # Extract Top Words
+    t_weights = instance_shap[:len(tokens)]
+    word_impacts = list(zip(tokens, t_weights))
+    word_impacts.sort(key=lambda x: x[1], reverse=True)
+    top_words = [w[0] for w in word_impacts if w[1] > 0][:5]
+
+    # Extract Top Behaviors
+    beh_vals = instance_shap[2048:2057]
+    beh_impacts = list(zip(beh_names, beh_vals))
+    beh_impacts.sort(key=lambda x: x[1], reverse=True)
+    top_behaviors = [b[0] for b in beh_impacts if b[1] > 0][:3]
+    
+    return modality_pct, top_words, top_behaviors
+
+def create_local_llm_messages(prob, modality_pct, top_words, top_behaviors, has_image):
+    prediction = "Positive for Depression Risk" if prob > 0.52 else "Negative (Healthy)"
+    
+    # We use a chat format (system/user messages) which works best for instruct models
+    messages = [
+        {
+            "role": "system", 
+            "content": "You are a clinical data summarizer. Write a single, concise, professional paragraph explaining why the AI made its prediction based ONLY on the data provided. Do not invent medical advice."
+        },
+        {
+            "role": "user", 
+            "content": f"""
+Prediction: {prediction}
+Confidence: {prob:.1%}
+
+Key Factors:
+- Modality Weights: Text ({modality_pct['Text']}), Images ({modality_pct['Visual']}), Behavior ({modality_pct['Behavioral']}).
+- Top Text Triggers: {', '.join(top_words) if top_words else 'None'}.
+- Top Behavioral Triggers: {', '.join(top_behaviors) if top_behaviors else 'None'}.
+- Visuals: {'Analyzed and contributed to the decision.' if has_image else 'No image provided.'}
+
+Write the summary paragraph now:"""
+        }
+    ]
+    return messages
 
 # --- UI HEADER ---
 st.title("🧠 Tri-Modal Ensemble Diagnostic Dashboard")
@@ -175,6 +234,35 @@ if analyze_btn:
                 txt = "white" if alpha > 0.5 else "black"
                 html += f"<span style='background-color:{bg}; color:{txt}; padding:6px 10px; margin:4px; border-radius:5px; font-weight:600;'>{word}</span> "
             st.markdown(html + "</div>", unsafe_allow_html=True)
+    
+    # --- PLOT 4: Textual Saliency ---
+            # ... (Your existing Text Saliency code here) ...
+            
+            st.markdown("---")
+            st.write("### 🤖 Local AI Diagnostic Summary")
+            
+            # Extract plain English facts from SHAP
+            modality_pct, top_words, top_behaviors = extract_top_shap_features(instance_shap, tokens, BEH_NAMES)
+            
+            # Format messages for the local model
+            messages = create_local_llm_messages(prob, modality_pct, top_words, top_behaviors, uploaded_image is not None)
+            
+            with st.spinner("Local AI is writing the report (this may take 10-20 seconds on CPU)..."):
+                try:
+                    # Run the local LLM
+                    output = local_llm(
+                        messages, 
+                        max_new_tokens=150, 
+                        temperature=0.3, # Low temp keeps it focused and factual
+                        do_sample=True
+                    )
+                    
+                    # Extract the generated text
+                    report = output[0]['generated_text'][-1]['content']
+                    
+                    st.success(report)
+                except Exception as e:
+                    st.error(f"Local text generation failed: {str(e)}")
 
 # --- EVALUATION SECTION ---
 st.markdown("---")
